@@ -3,6 +3,7 @@
 
 import sys
 from fastapi import FastAPI, Request
+from typing import Any, Dict, List, Optional, Tuple
 import time, requests, re
 
 from environment import load_env, env
@@ -199,37 +200,52 @@ def debug_retrieve(q: str, k: int = 4):
     return {"query": q, "fixed": q_fixed, "hits": len(contexts), "previews": previews, "citations": citations}
 
 
-@app.post("/process")
-def process(req: KMRequest):
-    """Full RAG pipeline with safety, intent, rephrase, retrieval, synthesis, post-safety & grounding.
+###############################################
+# Modular helpers for /process orchestration  #
+###############################################
+"""The original monolithic `process` endpoint has been decomposed into focused
+helper functions. Each helper returns primitive data plus (optionally) an
+"early" response dict when a terminal condition is met (e.g. safety block,
+intent out-of-scope, retrieval empty, LLM failure). The main orchestrator keeps
+the same external behavior/fields while gaining readability & testability.
 
-    Optional tracing: pass {"trace": true} to receive an ordered list of internal events.
+Helper return conventions:
+ - (_safety_pre_check) -> (safety_result, early_response_or_None)
+ - (_classify_intent)  -> (intent_obj, early_response_or_None)
+ - (_rephrase_query)   -> rephrased_query
+ - (_retrieve_and_build_prompt) -> (prompt_or_None, citations, contexts, scores, early_response_or_None)
+ - (_generate_answer)  -> (answer_or_None, early_response_or_None)
+ - (_post_safety_and_ground) -> (final_answer, post_moderation_obj, original_answer)
+
+Trace & timings dicts are threaded through unchanged enabling existing
+observability. Any future step can follow the same pattern: operate, append to
+timings, maybe return early.
+"""
+
+def _safety_pre_check(text: str, timings: Dict[str, float], trace_events, trace_id: str, t0: float) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+    """Run initial safety inspection.
+
+    Returns (safety_result, early_response_if_blocked_or_error)
     """
-    t0 = time.time()
-    trace_enabled = bool(getattr(req, 'trace', False) or TRACE_DEFAULT)
-    trace_id = str(_uuid.uuid4())
-    trace_events = [] if trace_enabled else None
-    _maybe_trace(trace_events, trace_id, t0, "request_received", query_len=len(req.user_input))
-
-    timings = {}
-    # 1) safety inspect
     try:
-        t_inspect_start = time.time(); safety_result = requests.post(f"{LLM_API}/inspect", json={"text": req.user_input}, timeout=8).json()
-        timings['safety_inspect'] = time.time() - t_inspect_start
+        t_inspect_start = time.time(); safety_result = requests.post(f"{LLM_API}/inspect", json={"text": text}, timeout=8).json(); timings['safety_inspect'] = time.time() - t_inspect_start
         _maybe_trace(trace_events, trace_id, t0, "safety_pre", **{k: safety_result.get(k) for k in ("policy","block","categories")})
         if safety_result.get("block", (not safety_result.get("safe", True))):
             log.warning("Request blocked by safety check policy=%s categories=%s", safety_result.get('policy'), safety_result.get('categories'))
-            return {"bot_output": "The query was blocked by safety checks.", "citations": [], "moderation": safety_result, **({"trace": trace_events, "trace_id": trace_id} if trace_events else {})}
+            return safety_result, {"bot_output": "The query was blocked by safety checks.", "citations": [], "moderation": safety_result}
+        return safety_result, None
     except requests.exceptions.RequestException:
         log.exception("Inspection call failed")
-        return {"bot_output": "Inspection failed. Try again later.", "citations": []}
+        return None, {"bot_output": "Inspection failed. Try again later.", "citations": []}
 
-    # 2) intent classification (in-domain vs out_of_scope) BEFORE rephrase & retrieval
-    intent_obj = {"intent": "unknown", "out_of_scope": True, "reason": "classifier_failed"}
+
+def _classify_intent(user_input: str, timings: Dict[str, float], trace_events, trace_id: str, t0: float) -> Tuple[Dict[str, Any], Optional[Dict[str, Any]]]:
+    """Classify intent; return (intent_obj, early_response_if_out_of_scope)."""
+    intent_obj: Dict[str, Any] = {"intent": "unknown", "out_of_scope": True, "reason": "classifier_failed"}
     try:
         t_intent_start = time.time()
         try:
-            intent_tmpl = format_prompt("intent_classify_v1", question=req.user_input)
+            intent_tmpl = format_prompt("intent_classify_v1", question=user_input)
             sys_part = intent_tmpl.get('system') or ''
             user_part = intent_tmpl.get('user') or ''
             intent_prompt = f"{sys_part}\n\n{user_part}" if sys_part else user_part
@@ -237,7 +253,7 @@ def process(req: KMRequest):
             intent_prompt = (
                 "You output ONLY minified JSON: {\"intent\":string,\"out_of_scope\":boolean,\"reason\":string}. "
                 "If query not about billing, online/advance payment, ECS, security deposit, tariff/billing, name/address change, reconnection, load enhancement, AC installation, meter, wiring say out_of_scope true.\nQuery: "
-                + req.user_input
+                + user_input
             )
         log.info("POST %s/chat (intent)", LLM_API)
         ic = requests.post(f"{LLM_API}/chat", json={"prompt": intent_prompt}, timeout=12)
@@ -250,8 +266,10 @@ def process(req: KMRequest):
         except Exception:
             m = _re.search(r"\{.*\}", raw_ic, _re.DOTALL)
             if m:
-                try: parsed = _json.loads(m.group(0))
-                except Exception: pass
+                try:
+                    parsed = _json.loads(m.group(0))
+                except Exception:
+                    pass
         if isinstance(parsed, dict):
             intent_obj['intent'] = parsed.get('intent', intent_obj['intent'])
             intent_obj['out_of_scope'] = bool(parsed.get('out_of_scope', intent_obj['out_of_scope']))
@@ -260,117 +278,114 @@ def process(req: KMRequest):
         log.info("intent=%s out_of_scope=%s reason=%s", intent_obj['intent'], intent_obj['out_of_scope'], intent_obj['reason'])
         _maybe_trace(trace_events, trace_id, t0, "intent_result", **intent_obj)
         if intent_obj.get('out_of_scope', True):
-            resp = {
+            return intent_obj, {
                 "bot_output": "I don't have information about that. Please ask about billing, payment, ECS, security deposit, tariff, meter, reconnection, load, AC installation, wiring or related support topics.",
                 "citations": [],
                 "intent": intent_obj,
-                "timings": timings
             }
-            if trace_events: resp.update({"trace": trace_events, "trace_id": trace_id})
-            return resp
     except Exception:
         log.exception("Intent classification failed; proceeding without gating")
+    return intent_obj, None
 
-    # 3) rephrase (best-effort) to improve retrieval via prompt template (optionally could condition on intent)
+
+def _rephrase_query(original_query: str, timings: Dict[str, float], trace_events, trace_id: str, t0: float) -> str:
+    """Attempt to rephrase the query for improved retrieval; fallback to original on failure."""
     try:
         t_rephrase_start = time.time()
         try:
-            tmpl = format_prompt("rephrase_v1", question=req.user_input)
+            tmpl = format_prompt("rephrase_v1", question=original_query)
             synth_query = tmpl['user']
             synth_context = tmpl['system']
         except (PromptNotFoundError, KeyError) as e:
             log.warning("Falling back to inline rephrase due to template issue: %s", e)
             synth_query = 'Return STRICT JSON only, no prose: {"intent": string, "rephrased": string suitable for vector search}.'
-            synth_context = f"User query: {req.user_input}"
+            synth_context = f"User query: {original_query}"
         raw = _call_llm_synthesize(query=synth_query, context=synth_context)
-        rephrased = req.user_input
+        rephrased = original_query
         if raw:
             import json as _json
             try:
                 obj = _json.loads(raw)
-                rephrased = obj.get("rephrased") or obj.get("intent") or req.user_input
+                rephrased = obj.get("rephrased") or obj.get("intent") or original_query
             except Exception:
                 if len(raw) < 160:
                     rephrased = raw
         log.info("rephrased query: '%s'", rephrased[:160].replace("\n", " "))
         timings['rephrase'] = time.time() - t_rephrase_start
         _maybe_trace(trace_events, trace_id, t0, "rephrase_result", rephrased=rephrased[:160])
+        return rephrased
     except Exception:
         log.warning("Rephrase step failed; using original query")
-        rephrased = req.user_input
+        return original_query
 
-    # 3) retrieve (multi-pass with expansions if first pass empty)
+
+def _retrieve_and_build_prompt(rephrased: str, original_query: str, timings: Dict[str, float], trace_events, trace_id: str, t0: float) -> Tuple[Optional[str], List[Dict[str, Any]], List[str], List[float], Optional[Dict[str, Any]]]:
+    """Perform multi-variant retrieval and assemble answer prompt.
+
+    Returns (prompt, citations, contexts, scores, early_response_if_any)
+    """
     try:
         t_retrieve_start = time.time()
         variants = _expand_query_variants(rephrased)
-        all_rows = []  # (content, score, source, vid)
-        variant_meta = []  # track which variant produced hits
-        for vi, variant in enumerate(variants):
+        all_rows = []  # (content, citation_dict)
+        for variant in variants:
             query_embedding = _embed_query_via_api(variant, timings, trace_events, trace_id, t0)
             if not query_embedding:
                 continue
-            contexts_v, citations_v, retrieval_meta_v = _retrieve_pgvector(query_embedding, VECTOR_K, timings, trace_events, trace_id, t0)
+            contexts_v, citations_v, _ = _retrieve_pgvector(query_embedding, VECTOR_K, timings, trace_events, trace_id, t0)
             if contexts_v:
                 for c, cit in zip(contexts_v, citations_v):
                     all_rows.append((c, cit))
-                variant_meta.append({"variant": variant, "hits": len(contexts_v)})
-            # If we already have enough hits, we can break early to save latency
             if len(all_rows) >= VECTOR_K:
                 break
-        # Merge by (source,id,score) uniqueness keeping insertion order
-        merged_contexts = []
-        merged_citations = []
-        seen_keys = set()
+        # Merge unique (source,id)
+        seen_keys = set(); contexts: List[str] = []; citations: List[Dict[str, Any]] = []
         for content, cit in all_rows:
-            key = (cit['source'], cit['id'])
+            key = (cit.get('source'), cit.get('id'))
             if key in seen_keys:
                 continue
             seen_keys.add(key)
-            merged_contexts.append(content)
-            merged_citations.append(cit)
-            if len(merged_contexts) >= VECTOR_K:
+            contexts.append(content)
+            citations.append(cit)
+            if len(contexts) >= VECTOR_K:
                 break
-        contexts, citations = merged_contexts, merged_citations
-        # Synthesize retrieval_meta (scores only) for stats
-        retrieval_meta = [{"score": c.get('score'), "source": c.get('source'), "id": c.get('id')} for c in citations]
         timings['retrieval_total'] = time.time() - t_retrieve_start
-        scores = [m['score'] for m in retrieval_meta if isinstance(m.get('score'), (int,float))]
+        scores = [c.get('score') for c in citations if isinstance(c.get('score'), (int, float))]
         if not contexts:
             _maybe_trace(trace_events, trace_id, t0, "retrieval_empty", variants=variants)
-            return {"bot_output": "Sorry, I couldn’t find relevant information in the documents.", "citations": [], "expansions_tried": variants}
-        # Log sample hits
-        for i, meta in enumerate(retrieval_meta[:VECTOR_K]):
-            log.info("hit[%d] backend=pgvector score=%s source=%s", i, None if meta.get('score') is None else round(meta['score'],4), meta.get('source'))
-        # Retrieval confidence gating
+            return None, [], [], [], {"bot_output": "Sorry, I couldn’t find relevant information in the documents.", "citations": [], "expansions_tried": variants}
+        # Confidence gating
         try:
-            usable_scores = scores
-            best = max(usable_scores) if usable_scores else None
-            avg = sum(usable_scores)/len(usable_scores) if usable_scores else None
+            best = max(scores) if scores else None
+            avg = sum(scores)/len(scores) if scores else None
             combined_len = sum(len(c) for c in contexts)
-            # Gate only if both poor similarity and tiny context and no domain keywords visible
             context_join_lower = " ".join(contexts).lower()
             has_domain_token = any(k in context_join_lower for k in DOMAIN_KEYWORDS)
             if best is not None and best < RETRIEVAL_MIN_SCORE and combined_len < 120 and not has_domain_token:
                 log.warning("Low confidence retrieval (best=%.3f len=%d domain=%s) -> unknown", best, combined_len, has_domain_token)
-                return {"bot_output": "I don't know.", "citations": citations, "retrieval": {"best_score": best, "threshold": RETRIEVAL_MIN_SCORE, "context_length": combined_len}}
+                return None, citations, contexts, scores, {"bot_output": "I don't know.", "citations": citations, "retrieval": {"best_score": best, "threshold": RETRIEVAL_MIN_SCORE, "context_length": combined_len}}
             _maybe_trace(trace_events, trace_id, t0, "similarity_stats", best=best, avg=avg, context_chars=combined_len, backend='pgvector')
         except Exception:
             log.warning("Retrieval confidence gating failed (continuing)")
-        # build final answer prompt via template
+        # Build answer prompt
         try:
-            answer_tmpl = format_prompt("rag_answer_v1", context="\n---\n".join(contexts), user_query=req.user_input)
+            answer_tmpl = format_prompt("rag_answer_v1", context="\n---\n".join(contexts), user_query=original_query)
             prompt = f"{answer_tmpl['system']}\n\n{answer_tmpl['user']}"
         except Exception as e:
             log.warning("Falling back to inline answer prompt: %s", e)
             prompt = (
                 "Answer ONLY from the context. If not present, say you don't know.\n"
                 "Include brief citations (source/section if present).\n\n"
-                f"Context:\n---\n{chr(10).join(contexts)}\n---\n\nQ: {req.user_input}\nA:" )
+                f"Context:\n---\n{chr(10).join(contexts)}\n---\n\nQ: {original_query}\nA:"
+            )
+        return prompt, citations, contexts, scores, None
     except Exception:
         log.exception("Retrieval error")
-        return {"bot_output": "Retrieval failed. Try again later.", "citations": []}
+        return None, [], [], [], {"bot_output": "Retrieval failed. Try again later.", "citations": []}
 
-    # 4) LLM synthesis
+
+def _generate_answer(prompt: str, timings: Dict[str, float], trace_events, trace_id: str, t0: float) -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
+    """LLM chat generation. Returns (answer, early_error_response)."""
     try:
         t_llm_start = time.time()
         log.info("POST %s/chat", LLM_API)
@@ -380,13 +395,15 @@ def process(req: KMRequest):
         answer = r.json().get("answer", "").strip()
         timings['llm_generate'] = time.time() - t_llm_start
         _maybe_trace(trace_events, trace_id, t0, "llm_answer", chars=len(answer))
+        return answer, None
     except requests.exceptions.RequestException:
         log.exception("LLM synthesis failed")
-        return {"bot_output": "Synthesis failed. Try again later.", "citations": []}
+        return None, {"bot_output": "Synthesis failed. Try again later.", "citations": []}
 
+
+def _post_safety_and_ground(answer: str, contexts: List[str], timings: Dict[str, float], trace_events, trace_id: str, t0: float) -> Tuple[str, Optional[Dict[str, Any]], str]:
+    """Run post generation safety + grounding. Returns (final_answer, post_moderation_obj, original_answer)."""
     original_answer = answer
-
-    # 5) safety post-check FIRST on original answer
     post = None
     try:
         post_t0 = time.time(); post = requests.post(f"{LLM_API}/inspect", json={"text": answer}, timeout=8).json(); timings['post_inspect'] = time.time() - post_t0
@@ -397,8 +414,7 @@ def process(req: KMRequest):
             answer = "The generated content was moderated and withheld."
     except Exception:
         log.warning("Post-inspection failed")
-
-    # 6) grounding enforcement after safety (only if answer not replaced by moderation message)
+    # Grounding
     try:
         if ENFORCE_GROUNDED and not answer.startswith("The generated content was moderated"):
             joined_context = "\n".join(contexts).lower()
@@ -417,23 +433,78 @@ def process(req: KMRequest):
                 log.info("Grounding skipped (no tokens)")
     except Exception:
         log.warning("Grounding enforcement failed (continuing with current answer)")
+    return answer, post, original_answer
 
+
+@app.post("/process")
+def process(req: KMRequest):
+    """Full RAG pipeline orchestrator.
+
+    Steps: pre-safety -> intent -> rephrase -> retrieval+prompt -> generation -> post-safety -> grounding -> response assembly.
+    Optional tracing: pass {"trace": true} to receive ordered trace events.
+    Behavior preserved from original monolithic implementation.
+    """
+    t0 = time.time()
+    trace_enabled = bool(getattr(req, 'trace', False) or TRACE_DEFAULT)
+    trace_id = str(_uuid.uuid4())
+    trace_events = [] if trace_enabled else None
+    _maybe_trace(trace_events, trace_id, t0, "request_received", query_len=len(req.user_input))
+
+    timings: Dict[str, float] = {}
+
+    # 1) Safety pre-check
+    safety_result, early = _safety_pre_check(req.user_input, timings, trace_events, trace_id, t0)
+    if early:
+        if trace_events: early.update({"trace": trace_events, "trace_id": trace_id})
+        return early
+
+    # 2) Intent classification
+    intent_obj, early = _classify_intent(req.user_input, timings, trace_events, trace_id, t0)
+    if early:
+        if trace_events: early.update({"trace": trace_events, "trace_id": trace_id})
+        return early
+
+    # 3) Rephrase
+    rephrased = _rephrase_query(req.user_input, timings, trace_events, trace_id, t0)
+
+    # 4) Retrieval + prompt
+    prompt, citations, contexts, scores, early = _retrieve_and_build_prompt(rephrased, req.user_input, timings, trace_events, trace_id, t0)
+    if early:
+        if trace_events: early.update({"trace": trace_events, "trace_id": trace_id})
+        return early
+    if not prompt:  # defensive
+        return {"bot_output": "Retrieval failed. Try again later.", "citations": []}
+
+    # 5) Generation
+    answer, early = _generate_answer(prompt, timings, trace_events, trace_id, t0)
+    if early:
+        if trace_events: early.update({"trace": trace_events, "trace_id": trace_id})
+        return early
+    if answer is None:
+        return {"bot_output": "Synthesis failed. Try again later.", "citations": []}
+
+    # 6) Post safety + grounding
+    final_answer, post_obj, original_answer = _post_safety_and_ground(answer, contexts, timings, trace_events, trace_id, t0)
+
+    # 7) Assemble response
     total = time.time() - t0
     timings['total'] = total
     log.info("TIMINGS %s", timings)
-    resp = {"bot_output": answer, "citations": citations, "timings": timings, "intent": intent_obj, "retrieval_stats": {"scores_present": any(isinstance(s,(int,float)) for s in scores), "backend": "pgvector"}}
-    # Always surface post moderation details if we performed it
-    try:
-        if 'post_inspect' in timings:
-            resp['moderation_post'] = post  # type: ignore
-    except Exception:
-        pass
-    if INCLUDE_DEBUG_ANSWER and answer != original_answer:
+    resp: Dict[str, Any] = {
+        "bot_output": final_answer,
+        "citations": citations,
+        "timings": timings,
+        "intent": intent_obj,
+        "retrieval_stats": {"scores_present": any(isinstance(s,(int,float)) for s in scores), "backend": "pgvector"}
+    }
+    if 'post_inspect' in timings and post_obj is not None:
+        resp['moderation_post'] = post_obj
+    if INCLUDE_DEBUG_ANSWER and final_answer != original_answer:
         resp['debug_raw_answer'] = original_answer
     if trace_events:
         resp['trace_id'] = trace_id
         resp['trace'] = trace_events
-        _maybe_trace(trace_events, trace_id, t0, "response_ready", answer_chars=len(answer))
+        _maybe_trace(trace_events, trace_id, t0, "response_ready", answer_chars=len(final_answer))
     return resp
 
 
