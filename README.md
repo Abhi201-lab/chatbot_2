@@ -36,6 +36,7 @@ Core goals:
 | `llmapi_v1` | 8002 | Embedding, chat, synthesis and safety inspection wrapper |
 | `ingestapi_v1` | 8003 | Document upload & JSON ingest: chunking + embedding + persistence |
 | `postgres_v1` | 5432 (host 5543) | Postgres with pgvector extension |
+Note: Ports numbers can vary 
 
 ## 4. Data Flow (Full `/process` Pipeline)
 1. Request enters `chat_api_v1` (optionally adds session/user metadata)from UI.
@@ -154,7 +155,7 @@ Returned `trace` array events (timestamps relative to request start):
 - grounding
 - response_ready
 
-## 13. Normalization & Indexing
+## 13. Normalization & Indexing (WIP)
 Normalization script (if needed for legacy rows):
 ```powershell
 $env:DATABASE_URL="postgresql://postgres:123@localhost:5543/chatdb"
@@ -176,7 +177,7 @@ SET ivfflat.probes = 10;
 4. Adjust `RETRIEVAL_MIN_SCORE`, `VECTOR_K`, temporarily disable grounding.
 5. Add more domain documents (content coverage beats threshold tweaks).
 
-## 15. Safety & Grounding Tuning
+## 15. Safety & Grounding Tuning (WIP)
 | Goal | Change |
 |------|--------|
 | Reduce false blocks | Set `SAFETY_DISABLE_BLOCK=1` temporarily |
@@ -193,13 +194,9 @@ SET ivfflat.probes = 10;
 - Cached rephrase results with TTL to save tokens.
 - Structured citation formatting / highlighting in UI.
 
-## 17. Security / Operational Notes
-- Keep API keys out of source control (use per-service `.env`).
-- Rate limit external LLM calls if exposing publicly.
-- Add request size limits on upload endpoints for large PDFs.
-- Enable SSL termination at ingress/proxy layer in production.
+## 17. Security / Operational Notes (FS)
 
-## 18. Directory Structure (Key Portions)
+## 18. Directory Structure 
 ```
 chat_api_v1/          # Gateway
 kmapi_v1/             # Retrieval + orchestration
@@ -219,17 +216,16 @@ scripts/normalize_vectors.py
 6. Query `/process` with trace to confirm full pipeline.
 7. (Optional) Create IVF / HNSW index once corpus grows.
 
-## 20. Troubleshooting Table (Condensed)
+## 20. Troubleshooting Table (FS)
 | Symptom | Action |
 |---------|--------|
-| 0 hits, rows > 0 | Check logs for operator error; ensure vector literal fix deployed |
+| 0 hits, rows > 0 | Check logs for operator error; ensure vector literal fix deployed | testing
 | Slow retrieval | Add IVF index, tune lists/probes |
 | Hallucinations | Raise `GROUNDING_MIN_OVERLAP`, enforce grounding |
 | Over-blocking | Enable `SAFETY_DISABLE_BLOCK`, review categories |
 | Low recall | Lower `RETRIEVAL_MIN_SCORE`, raise `VECTOR_K`, add docs |
 
 ## 21. License / Usage
-Internal prototype. Add appropriate license text before distribution.
+Internal prototype.
 
 ---
-**Status:** pgvector-only, multi-pass retrieval and literal vector query fix applied.
