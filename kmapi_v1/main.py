@@ -1,20 +1,3 @@
-"""Knowledge Manager API entrypoint.
-
-This file now acts as a lightweight application factory wiring together:
- - config (environment, logger, pipeline context)
- - routers (diagnostics, rag)
- - middleware (request logging)
- - retrieval utilities (imported indirectly by routers)
-
-Business logic and helpers were extracted to:
- - pipeline.py (pipeline steps)
- - retrieval_utils.py (embedding + retrieval helpers)
- - routers/diagnostics.py (health, stats, debug retrieval)
- - routers/rag.py (process + rag_simple endpoints)
- - config.py (env + constants + context)
-
-This modular structure improves testability and separation of concerns.
-"""
 
 from fastapi import FastAPI, Request
 import time
