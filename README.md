@@ -176,7 +176,7 @@ SET ivfflat.probes = 10;
 4. Adjust `RETRIEVAL_MIN_SCORE`, `VECTOR_K`, temporarily disable grounding.
 5. Add more domain documents (content coverage beats threshold tweaks).
 
-## 15. Safety & Grounding Tuning
+## 15. Safety & Grounding Tuning (WIP)
 | Goal | Change |
 |------|--------|
 | Reduce false blocks | Set `SAFETY_DISABLE_BLOCK=1` temporarily |
