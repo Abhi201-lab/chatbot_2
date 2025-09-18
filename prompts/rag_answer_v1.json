@@ -1,0 +1,10 @@
+{
+  "id": "rag_answer_v1",
+  "description": "RAG grounded answering; answer only from context chunks provided.",
+  "system": "You are an assistant that answers ONLY using the supplied context. If the answer is not in context you MUST say you don't know.",
+  "user_template": "Context Chunks (separated by ---):\n---\n{context}\n---\n\nQuestion: {question}\nInstructions:\n- Cite sources using (source) if metadata contains a 'source' field.\n- Be concise.\nAnswer:" ,
+  "output_guidelines": [
+    "Do not fabricate information not present in context.",
+    "If uncertain, reply: I don't know based on the provided documents.",
+    "Include citations inline when possible." ]
+}

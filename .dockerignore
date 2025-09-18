@@ -1,0 +1,18 @@
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+.venv/
+venv/
+.build/
+.dist/
+*.egg-info
+*.egg
+.DS_Store
+*.sqlite3
+.env
+
+# FAISS index (usually large) - we mount it as a volume in compose
+ingestapi/faiss_index_ingest

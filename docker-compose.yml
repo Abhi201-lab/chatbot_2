@@ -1,0 +1,104 @@
+version: '3.8'
+
+services:
+  chat_api_v1:
+    build: ./chat_api_v1
+    container_name: chat_api_v1
+    ports:
+      - "8080:8000"
+    env_file:
+      - ./chat_api_v1/.env
+    restart: unless-stopped
+    depends_on:
+      postgres_v1:
+        condition: service_healthy
+      kmapi_v1:
+        condition: service_healthy
+      llmapi_v1:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import sys,urllib.request as u; r=u.urlopen('http://127.0.0.1:8000/health', timeout=2); sys.exit(0)\""]
+      interval: 30s
+      timeout: 3s
+      retries: 2
+
+  kmapi_v1:
+    build: ./kmapi_v1
+    container_name: kmapi_v1
+    ports:
+      - "8081:8001"
+    env_file:
+      - ./kmapi_v1/.env
+      # Reuse provider credentials from llmapi_v1, notably OPENAI_API_KEY
+      - ./llmapi_v1/.env
+    restart: unless-stopped
+    depends_on:
+      llmapi_v1:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import sys,urllib.request as u; r=u.urlopen('http://127.0.0.1:8001/health', timeout=2); sys.exit(0)\""]
+      interval: 30s
+      timeout: 3s
+      retries: 2
+
+  llmapi_v1:
+    build: ./llmapi_v1
+    container_name: llmapi_v1
+    ports:
+      - "8082:8002"
+    env_file:
+      - ./llmapi_v1/.env
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import sys,urllib.request as u; r=u.urlopen('http://127.0.0.1:8002/health', timeout=2); sys.exit(0)\""]
+      interval: 30s
+      timeout: 3s
+      retries: 2
+
+  ingestapi_v1:
+    build: ./ingestapi_v1
+    container_name: ingestapi_v1
+    ports:
+      - "8083:8003"
+    env_file:
+      - ./ingestapi_v1/.env
+    restart: unless-stopped
+    depends_on:
+      postgres_v1:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import sys,urllib.request as u; r=u.urlopen('http://127.0.0.1:8003/health', timeout=2); sys.exit(0)\""]
+      interval: 30s
+      timeout: 3s
+      retries: 2
+
+  chatui_v1:
+    build: ./chatui_v1
+    container_name: chatui_v1
+    ports:
+      - "8502:8501"
+    env_file:
+      - ./chatui_v1/.env
+    restart: unless-stopped
+
+  postgres_v1:
+    image: ankane/pgvector:latest
+    container_name: chatbot_postgres_v1
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: 123
+      POSTGRES_DB: chatdb
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./postgres-init:/docker-entrypoint-initdb.d:ro
+    ports:
+      - "5543:5432"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+volumes:
+  postgres_data:

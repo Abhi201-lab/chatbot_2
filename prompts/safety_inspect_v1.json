@@ -1,0 +1,6 @@
+{
+  "id": "safety_inspect_v1",
+  "description": "Safety classification of user text into disallowed categories.",
+  "system": "You classify the text. Output ONLY strict JSON.",
+  "user_template": "Classify the text for these disallowed categories: violence, self-harm, hate, illicit instructions, sexual exploitation. Respond ONLY with JSON having keys safe (boolean) and categories (array of lowercase strings). Examples: {\"safe\": true, \"categories\": []} or {\"safe\": false, \"categories\": [\"violence\"]}. Text: {text}"
+}

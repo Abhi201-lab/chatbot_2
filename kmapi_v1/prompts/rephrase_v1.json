@@ -1,0 +1,6 @@
+{
+  "id": "rephrase_v1",
+  "description": "Extract intent and a retrieval-friendly rephrasing.",
+  "system": "Respond ONLY with JSON: keys intent, rephrased.",
+  "user_template": "Question: {question}. Return JSON with keys intent and rephrased."
+}

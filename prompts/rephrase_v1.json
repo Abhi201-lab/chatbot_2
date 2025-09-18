@@ -1,0 +1,6 @@
+{
+  "id": "rephrase_v1",
+  "description": "Rephrase / intent extraction prompt returning strict JSON.",
+  "system": "You are a query refinement assistant. You ONLY output valid compact JSON.",
+  "user_template": "Given the user query below, produce JSON with keys intent and rephrased.\nUser query: {user_query}\nReturn STRICT JSON only: {\"intent\": string, \"rephrased\": string}"
+}

@@ -1,0 +1,6 @@
+{
+  "id": "safety_inspect_v1",
+  "description": "Classify text for disallowed categories.",
+  "system": "Respond ONLY with JSON: keys safe (boolean), categories (array).",
+  "user_template": "Text: {text}. List any categories: violence, self-harm, hate, illicit instructions, sexual exploitation. If none, empty array. Return JSON with keys safe, categories."
+}
