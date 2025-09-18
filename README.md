@@ -36,6 +36,7 @@ Core goals:
 | `llmapi_v1` | 8002 | Embedding, chat, synthesis and safety inspection wrapper |
 | `ingestapi_v1` | 8003 | Document upload & JSON ingest: chunking + embedding + persistence |
 | `postgres_v1` | 5432 (host 5543) | Postgres with pgvector extension |
+Note: Ports numbers can vary 
 
 ## 4. Data Flow (Full `/process` Pipeline)
 1. Request enters `chat_api_v1` (optionally adds session/user metadata)from UI.
