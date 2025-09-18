@@ -154,7 +154,7 @@ Returned `trace` array events (timestamps relative to request start):
 - grounding
 - response_ready
 
-## 13. Normalization & Indexing
+## 13. Normalization & Indexing (WIP)
 Normalization script (if needed for legacy rows):
 ```powershell
 $env:DATABASE_URL="postgresql://postgres:123@localhost:5543/chatdb"
@@ -193,13 +193,9 @@ SET ivfflat.probes = 10;
 - Cached rephrase results with TTL to save tokens.
 - Structured citation formatting / highlighting in UI.
 
-## 17. Security / Operational Notes
-- Keep API keys out of source control (use per-service `.env`).
-- Rate limit external LLM calls if exposing publicly.
-- Add request size limits on upload endpoints for large PDFs.
-- Enable SSL termination at ingress/proxy layer in production.
+## 17. Security / Operational Notes (FS)
 
-## 18. Directory Structure (Key Portions)
+## 18. Directory Structure 
 ```
 chat_api_v1/          # Gateway
 kmapi_v1/             # Retrieval + orchestration
@@ -219,17 +215,16 @@ scripts/normalize_vectors.py
 6. Query `/process` with trace to confirm full pipeline.
 7. (Optional) Create IVF / HNSW index once corpus grows.
 
-## 20. Troubleshooting Table (Condensed)
+## 20. Troubleshooting Table (FS)
 | Symptom | Action |
 |---------|--------|
-| 0 hits, rows > 0 | Check logs for operator error; ensure vector literal fix deployed |
+| 0 hits, rows > 0 | Check logs for operator error; ensure vector literal fix deployed | testing
 | Slow retrieval | Add IVF index, tune lists/probes |
 | Hallucinations | Raise `GROUNDING_MIN_OVERLAP`, enforce grounding |
 | Over-blocking | Enable `SAFETY_DISABLE_BLOCK`, review categories |
 | Low recall | Lower `RETRIEVAL_MIN_SCORE`, raise `VECTOR_K`, add docs |
 
 ## 21. License / Usage
-Internal prototype. Add appropriate license text before distribution.
+Internal prototype.
 
 ---
-**Status:** pgvector-only, multi-pass retrieval and literal vector query fix applied.
